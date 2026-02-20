@@ -14,7 +14,7 @@ from telegram.ext import (
     filters
 )
 
-TOKEN = os.getenv("8219008753:AAGHfE6fLAeo0vzX44ANUG8hCyAa-MyGZHA")
+TOKEN = os.getenv("TOKEN")
 OWNER_ID = 7285840925  # ✅ Your Owner ID
 
 FORCE_CHANNELS = [
