@@ -1,26 +1,16 @@
 import os
 import json
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
+import asyncio
+import string
+import random
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 TOKEN = os.getenv("TOKEN")
-OWNER_ID = 7285840925  # ✅ Your Owner ID
+OWNER_ID = 7285840925
+STORAGE_CHANNEL = -1003832658884
 
-FORCE_CHANNELS = [
-    "CrazyTechOp",
-    "CrazyTechOpChat"
-]
+FORCE_CHANNELS = ["CrazyTechOp", "CrazyTechOpChat"]
 
 DATA_FILE = "data.json"
 
@@ -28,9 +18,10 @@ DATA_FILE = "data.json"
 # ---------------- DATA ---------------- #
 
 def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"users": [], "banned": [], "files": {}}
     with open(DATA_FILE, "r") as f:
         return json.load(f)
-
 
 def save_data(data):
     with open(DATA_FILE, "w") as f:
@@ -50,24 +41,6 @@ async def check_join(user_id, context):
     return True
 
 
-def join_buttons():
-    buttons = []
-
-    for channel in FORCE_CHANNELS:
-        buttons.append(
-            [InlineKeyboardButton(
-                f"🔐 Join {channel}",
-                url=f"https://t.me/{channel}"
-            )]
-        )
-
-    buttons.append(
-        [InlineKeyboardButton("🔄 Try Again", callback_data="check_join")]
-    )
-
-    return InlineKeyboardMarkup(buttons)
-
-
 # ---------------- START ---------------- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,136 +52,80 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not await check_join(user_id, context):
-        text = (
-            "🔒 *Access Restricted*\n\n"
-            "Join channels to use bot:\n\n"
-            "🔐 CrazyTechOp\n"
-            "🔐 CrazyTechOpChat\n\n"
-            "_After joining click Try Again._"
-        )
-
-        await update.message.reply_text(
-            text,
-            reply_markup=join_buttons(),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("🔒 Join required channels first.")
         return
 
-    if user_id not in data["users"]:
-        data["users"].append(user_id)
-        save_data(data)
+    if context.args:
+        code = context.args[0]
+        if code in data["files"]:
+            msg_id = data["files"][code]
+            sent = await context.bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=STORAGE_CHANNEL,
+                message_id=msg_id
+            )
+            await asyncio.sleep(30)
+            await sent.delete()
+            return
 
-    await update.message.reply_text("👋 Welcome! Send file 📁")
+    await update.message.reply_text(
+        "👋 Send files and use /finish to generate link.\n\n"
+        "Commands:\n"
+        "/finish\n"
+        "/myfiles"
+    )
 
 
-# ---------------- TRY AGAIN ---------------- #
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-
-    if await check_join(user_id, context):
-        await query.edit_message_text("✅ Access Verified! Send file 📁")
-    else:
-        await query.answer("❌ Still not joined!", show_alert=True)
-
-
-# ---------------- FILE HANDLER ---------------- #
+# ---------------- FILE RECEIVE ---------------- #
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = load_data()
 
-    if user_id in data["banned"]:
-        return
-
     if not await check_join(user_id, context):
-        await update.message.reply_text(
-            "🔒 Join required!",
-            reply_markup=join_buttons()
-        )
+        await update.message.reply_text("🔒 Join required.")
         return
 
-    data["total_files"] += 1
-    save_data(data)
+    forwarded = await update.message.copy(chat_id=STORAGE_CHANNEL)
 
-    await update.message.reply_text("✅ File received successfully!")
-
-
-# ---------------- ADMIN COMMANDS ---------------- #
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    data = load_data()
+    context.user_data.setdefault("queue", [])
+    context.user_data["queue"].append(forwarded.message_id)
 
     await update.message.reply_text(
-        f"📊 Bot Stats\n\n"
-        f"👥 Users: {len(data['users'])}\n"
-        f"🚫 Banned: {len(data['banned'])}\n"
-        f"📁 Files: {data['total_files']}"
+        f"✅ Added to queue. Total: {len(context.user_data['queue'])}\nSend /finish"
     )
 
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
+# ---------------- FINISH ---------------- #
 
-    if not context.args:
-        await update.message.reply_text("Usage: /ban user_id")
-        return
-
-    user_id = int(context.args[0])
+async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     data = load_data()
 
-    if user_id not in data["banned"]:
-        data["banned"].append(user_id)
-        save_data(data)
-
-    await update.message.reply_text(f"🚫 {user_id} banned.")
-
-
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
+    queue = context.user_data.get("queue", [])
+    if not queue:
+        await update.message.reply_text("No files in queue.")
         return
 
-    if not context.args:
-        await update.message.reply_text("Usage: /unban user_id")
-        return
+    code = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    data["files"][code] = queue[0]
+    save_data(data)
 
-    user_id = int(context.args[0])
-    data = load_data()
+    context.user_data["queue"] = []
 
-    if user_id in data["banned"]:
-        data["banned"].remove(user_id)
-        save_data(data)
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={code}"
 
-    await update.message.reply_text(f"✅ {user_id} unbanned.")
+    await update.message.reply_text(
+        f"🔗 Shareable Link:\n{link}\n\n"
+        f"⚠ File auto deletes after 30 sec when opened."
+    )
 
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
+# ---------------- MYFILES ---------------- #
 
-    if not context.args:
-        await update.message.reply_text("Usage: /broadcast message")
-        return
-
-    message = " ".join(context.args)
-    data = load_data()
-
-    success = 0
-    for user in data["users"]:
-        try:
-            await context.bot.send_message(user, message)
-            success += 1
-        except:
-            pass
-
-    await update.message.reply_text(f"📢 Broadcast sent to {success} users.")
+async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Use your generated links to access files.")
 
 
 # ---------------- APP ---------------- #
@@ -216,12 +133,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(button_handler))
-app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-app.add_handler(CommandHandler("stats", stats))
-app.add_handler(CommandHandler("ban", ban))
-app.add_handler(CommandHandler("unban", unban))
-app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("finish", finish))
+app.add_handler(CommandHandler("myfiles", myfiles))
+app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
 
 app.run_polling()
